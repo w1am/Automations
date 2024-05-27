@@ -1,19 +1,10 @@
-// This Github actions aims at supporting `keepachangelog` changelog format based
-// on a list of changes specified in a pull request description.
-// More info: https://keepachangelog.com/en/1.0.0/.
-//
-// This Github action will update the changelog automatically and push the changes on
-// the repository afterward.
 const core = require('@actions/core');
 const github = require('@actions/github');
 const { Base64 } = require('js-base64');
-
-// We use octokit directly because the version that @actions/github is too old.
 const { Octokit } = require('@octokit/rest');
+
 const auth = core.getInput('github-token');
-const octokit = new Octokit({
-  auth
-});
+const octokit = new Octokit({ auth });
 
 const onSpotMode = 'on-spot';
 const batchMode = 'batch';
@@ -210,12 +201,12 @@ const fetchPullRequestsOfTheDay = async (owner, repo, offset) => {
 // Fetches the content of the changelog (if any) from the main branch.
 // It's fine because our github action is supposed to be the only one updating
 // that file.
-const getCurrentChangelogText = async (owner, repo) => {
+const getCurrentChangelogText = async (owner, repo, path) => {
   try {
     const response = await octokit.repos.getContents({
       owner,
       repo,
-      path: "CHANGELOG.md",
+      path,
     });
 
     return Base64.decode(response.data.content);
@@ -223,7 +214,7 @@ const getCurrentChangelogText = async (owner, repo) => {
     if (error.status === 404) {
       return null;
     } else {
-      core.setFailed(`Unexpected error happened when listing CHANGELOG.md file: ${JSON.stringify(error, undefined, 4)}`);
+      core.setFailed(`Unexpected error happened when listing ${path} file: ${JSON.stringify(error, undefined, 4)}`);
     }
   }
 };
@@ -249,6 +240,19 @@ const validPullRequest = (pull) => {
     return token.section !== "" && token.message !== "";
   });
 };
+
+// Parses the pull request description to find the package paths
+function getPackagePathsFromDescription(description) {
+  const packageRegex = /Package:\s*(.*)/gi;
+  let match;
+  let packages = [];
+
+  while ((match = packageRegex.exec(description)) !== null) {
+    packages.push(match[1].trim());
+  }
+
+  return packages;
+}
 
 async function run() {
   try {
@@ -280,132 +284,138 @@ async function run() {
     }
     // End validation.
     core.debug("Complete…");
-    core.debug("Before getCurrentChangelogText…");
-    let changelog = await getCurrentChangelogText(owner, repo);
-    core.debug("Complete");
 
-    if (!changelog) {
-      changelog = initChangelog();
-      core.debug("CHANGELOG.md doesn’t exist. Created.");
+    const packagePaths = getPackagePathsFromDescription(payload.pull_request.body);
+    if (packagePaths.length === 0) {
+      core.setFailed("No package paths found in the pull request description.");
+      return;
     }
 
     let content = null;
     let base_tree = null;
     let commit_sha = null;
 
-    if (mode === onSpotMode) {
-      const params = {
-        repo,
-        title: payload.pull_request.title,
-        link: payload.pull_request._links.html.href,
-        number: payload.pull_request.number,
-        body: payload.pull_request.body,
-      };
+    for (const packagePath of packagePaths) {
+      const changelogPath = `${packagePath}/CHANGELOG.md`;
+      core.debug(`Fetching changelog from path: ${changelogPath}`);
+      let changelog = await getCurrentChangelogText(owner, repo, changelogPath);
 
-      content = getChangelogContent(changelog, params);
-
-      commit_sha = payload.pull_request.merge_commit_sha;
-      const response = await octokit.git.getCommit({
-        owner,
-        repo,
-        commit_sha
-      });
-
-      base_tree = response.data.tree.sha;
-    } else if (mode === batchMode) {
-      let offset = new Date();
-      offset.setUTCDate(offset.getUTCDate() - 1);
-
-      core.debug("Before fetchPullRequestsOfTheDay…");
-      let pulls = await fetchPullRequestsOfTheDay(owner, repo, offset);
-      core.debug("Completed");
-      core.debug("Gathering pull requests…");
-      let input = pulls.flatMap(pull => {
-        core.debug(`>>>Dealing with #${pull.number}`);
-        core.debug(`${JSON.stringify(pull, null, 4)}`);
-        // Because it is possible for a pull request check to be skipped by `pr-check` action (for example, if the PR
-        // doesn’t change anything under `src` directory), we got to filter those skipped pull requests out in batch
-        // mode.
-        if (!validPullRequest(pull)) {
-          core.info(`Pull request #${pull.number} was skipped`);
-          return [];
-        }
-
-        return [{
-          repo,
-          title: pull.title,
-          link: pull._links.html.href,
-          number: pull.number,
-          body: pull.body,
-        }];
-      });
-      core.debug("Completed");
-
-      if (input.length === 0) {
-        core.info(`No pull request found for ${offset.getUTCFullYear()}-${offset.getUTCMonth()}-${offset.getUTCDate()} day`);
-        return;
+      if (!changelog) {
+        changelog = initChangelog();
+        core.debug(`${changelogPath} doesn’t exist. Created.`);
       }
 
-      core.debug("Batch mode: folding pull requests into a changelog…");
-      content = input.reduce(getChangelogContent, changelog);
+      if (mode === onSpotMode) {
+        const params = {
+          repo,
+          title: payload.pull_request.title,
+          link: payload.pull_request._links.html.href,
+          number: payload.pull_request.number,
+          body: payload.pull_request.body,
+        };
+
+        content = getChangelogContent(changelog, params);
+
+        commit_sha = payload.pull_request.merge_commit_sha;
+        const response = await octokit.git.getCommit({
+          owner,
+          repo,
+          commit_sha
+        });
+
+        base_tree = response.data.tree.sha;
+      } else if (mode === batchMode) {
+        let offset = new Date();
+        offset.setUTCDate(offset.getUTCDate() - 1);
+
+        core.debug("Before fetchPullRequestsOfTheDay…");
+        let pulls = await fetchPullRequestsOfTheDay(owner, repo, offset);
+        core.debug("Completed");
+        core.debug("Gathering pull requests…");
+        let input = pulls.flatMap(pull => {
+          core.debug(`>>>Dealing with #${pull.number}`);
+          core.debug(`${JSON.stringify(pull, null, 4)}`);
+          if (!validPullRequest(pull)) {
+            core.info(`Pull request #${pull.number} was skipped`);
+            return [];
+          }
+
+          return [{
+            repo,
+            title: pull.title,
+            link: pull._links.html.href,
+            number: pull.number,
+            body: pull.body,
+          }];
+        });
+        core.debug("Completed");
+
+        if (input.length === 0) {
+          core.info(`No pull request found for ${offset.getUTCFullYear()}-${offset.getUTCMonth()}-${offset.getUTCDate()} day`);
+          return;
+        }
+
+        core.debug("Batch mode: folding pull requests into a changelog…");
+        content = input.reduce(getChangelogContent, changelog);
+        core.debug("Completed");
+        core.debug(`Batch mode: get ${default_branch} ref...`);
+        let response = await octokit.git.getRef({
+          owner,
+          repo,
+          ref: `heads/${default_branch}`,
+        });
+        core.debug("Completed");
+        core.debug(`Batch mode: get ${default_branch} ref commit...`);
+        commit_sha = response.data.object.sha;
+        response = await octokit.git.getCommit({
+          owner,
+          repo,
+          commit_sha
+        });
+        base_tree = response.data.tree.sha;
+        core.debug("Completed");
+      } else {
+        core.setFailed(`Unsupported mode: ${mode}`);
+      }
+
+      core.debug("Create a new git tree…");
+      const treeResponse = await octokit.git.createTree({
+        owner,
+        repo,
+        base_tree,
+        tree: [
+          {
+            path: changelogPath,
+            mode: '100644',
+            type: 'blob',
+            content,
+          }
+        ]
+      });
+
+      const newTreeSha = treeResponse.data.sha;
       core.debug("Completed");
-      core.debug(`Batch mode: get ${default_branch} ref...`);
-      let response = await octokit.git.getRef({
+      core.debug("Create commit…");
+      const createCommitResponse = await octokit.git.createCommit({
+        owner,
+        repo,
+        message: `Update ${changelogPath}`,
+        tree: newTreeSha,
+        parents: [commit_sha]
+      });
+
+      const newCommitSha = createCommitResponse.data.sha;
+      core.debug("Completed");
+
+      core.debug(`Update ${default_branch} ref...`);
+      await octokit.git.updateRef({
         owner,
         repo,
         ref: `heads/${default_branch}`,
+        sha: newCommitSha
       });
       core.debug("Completed");
-      core.debug(`Batch mode: get ${default_branch} ref commit...`);
-      commit_sha = response.data.object.sha;
-      response = await octokit.git.getCommit({
-        owner,
-        repo,
-        commit_sha
-      });
-      base_tree = response.data.tree.sha;
-      core.debug("Completed");
-    } else {
-      core.setFailed(`Unsupported mode: ${mode}`);
     }
-
-    core.debug("Create a new git tree…");
-    const treeResponse = await octokit.git.createTree({
-      owner,
-      repo,
-      base_tree,
-      tree: [
-        {
-          path: 'CHANGELOG.md',
-          mode: '100644',
-          type: 'blob',
-          content,
-        }
-      ]
-    });
-
-    const newTreeSha = treeResponse.data.sha;
-    core.debug("Completed");
-    core.debug("Create commit…");
-    const createCommitResponse = await octokit.git.createCommit({
-      owner,
-      repo,
-      message: 'Update CHANGELOG.md',
-      tree: newTreeSha,
-      parents: [commit_sha]
-    });
-
-    const newCommitSha = createCommitResponse.data.sha;
-    core.debug("Completed");
-
-    core.debug(`Update ${default_branch} ref...`);
-    await octokit.git.updateRef({
-      owner,
-      repo,
-      ref: `heads/${default_branch}`,
-      sha: newCommitSha
-    });
-    core.debug("Completed");
   } catch (error) {
     core.setFailed(`An unexpected error happened: ${JSON.stringify(error, undefined, 4)}`);
   }
