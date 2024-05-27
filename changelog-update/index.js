@@ -326,7 +326,6 @@ async function run() {
         base_tree = response.data.tree.sha;
       } else if (mode === batchMode) {
         let offset = new Date();
-        offset.setUTCDate(offset.getUTCDate() - 1);
 
         core.debug("Before fetchPullRequestsOfTheDay…");
         let pulls = await fetchPullRequestsOfTheDay(owner, repo, offset);
