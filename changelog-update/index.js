@@ -160,7 +160,7 @@ const belongsToSameDay = (refDate, targetDate) => {
   return refDate.getUTCDate() === targetDate.getUTCDate() && refDate.getUTCFullYear() === targetDate.getUTCFullYear() && refDate.getUTCMonth() === targetDate.getUTCMonth();
 };
 
-const fetchPullRequestsOfTheDay = async (owner, repo, offset) => {
+const fetchPullRequestsOfTheDay = async (owner, repo) => {
   let page = 1;
   let targetedPulls = [];
   let lastUpdateDate = null;
@@ -169,26 +169,21 @@ const fetchPullRequestsOfTheDay = async (owner, repo, offset) => {
     const response = await octokit.pulls.list({
       owner,
       repo,
-      state: "closed",
-      sort: "updated",
+      state: "open",
+      sort: "closed",
       direction: "desc",
       page,
     });
 
     response.data.forEach(pull => {
-      if (pull.merged_at) {
-        const updatedAt = new Date(pull.updated_at);
-        const mergedAt = new Date(pull.merged_at);
+      const updatedAt = new Date(pull.updated_at);
 
-        if (belongsToSameDay(offset, mergedAt)) {
-          targetedPulls.push(pull);
-        }
+      targetedPulls.push(pull);
 
-        lastUpdateDate = updatedAt;
-      }
+      lastUpdateDate = updatedAt;
     });
 
-    if (!lastUpdateDate || lastUpdateDate < offset)
+    if (!lastUpdateDate)
       break;
 
     lastUpdateDate = null;
@@ -260,6 +255,7 @@ async function run() {
     const skipped = core.getInput('skipped') || 'false';
     const owner = core.getInput("owner") || payload.repository.owner.login;
     const repo = core.getInput("repo") || payload.repository.name;
+    core.debug(`payload ${JSON.stringify(payload, null, 2)}`)
 
     core.debug(`Get ${owner}/${repo} default branch...`);
     const default_branch = (await octokit.repos.get({
@@ -284,6 +280,9 @@ async function run() {
     }
     // End validation.
     core.debug("Complete…");
+
+    // print the payload.pull_request.body
+    core.debug(`Pull request body: ${payload.pull_request}`);
 
     const packagePaths = getPackagePathsFromDescription(payload.pull_request.body);
     if (packagePaths.length === 0) {
@@ -325,10 +324,10 @@ async function run() {
 
         base_tree = response.data.tree.sha;
       } else if (mode === batchMode) {
-        let offset = new Date();
 
         core.debug("Before fetchPullRequestsOfTheDay…");
-        let pulls = await fetchPullRequestsOfTheDay(owner, repo, offset);
+        let pulls = await fetchPullRequestsOfTheDay(owner, repo);
+        core.debug(`Pulls ${JSON.stringify(pulls, null, 2)}`);
         core.debug("Completed");
         core.debug("Gathering pull requests…");
         let input = pulls.flatMap(pull => {
@@ -350,7 +349,7 @@ async function run() {
         core.debug("Completed");
 
         if (input.length === 0) {
-          core.info(`No pull request found for ${offset.getUTCFullYear()}-${offset.getUTCMonth()}-${offset.getUTCDate()} day`);
+          core.info(`No pull request found for `)
           return;
         }
 
@@ -416,7 +415,7 @@ async function run() {
       core.debug("Completed");
     }
   } catch (error) {
-    core.setFailed(`An unexpected error happened: ${JSON.stringify(error, undefined, 4)}`);
+    core.setFailed(`An unexpected error happened: ${error.message}\n${error.stack}`);
   }
 }
 
